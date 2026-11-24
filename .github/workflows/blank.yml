@@ -1,0 +1,96 @@
+name: Build Snow Rider Windows EXE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Find game page and create desktop app files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_WORKSPACE
+
+          # Prefer the original Android WebView game page.
+          $indexFile = Get-ChildItem -LiteralPath $repo -Filter 'index.html' -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName.Replace('\', '/').EndsWith('/app/src/main/assets/index.html', [System.StringComparison]::OrdinalIgnoreCase) } |
+            Select-Object -First 1
+
+          # If the source ZIP is in the repository, extract it and look again.
+          if ($null -eq $indexFile) {
+            $archive = Get-ChildItem -LiteralPath $repo -Filter '*.zip' -File -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+
+            if ($null -ne $archive) {
+              $extractPath = Join-Path $env:RUNNER_TEMP 'snowrider-source'
+              New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+              Expand-Archive -LiteralPath $archive.FullName -DestinationPath $extractPath -Force
+              $indexFile = Get-ChildItem -LiteralPath $extractPath -Filter 'index.html' -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName.Replace('\', '/').EndsWith('/app/src/main/assets/index.html', [System.StringComparison]::OrdinalIgnoreCase) } |
+                Select-Object -First 1
+            }
+          }
+
+          if ($null -eq $indexFile) {
+            throw 'Could not find the game page. Keep app/src/main/assets/index.html in the repository or put the original SnowRider ZIP in the repository.'
+          }
+
+          # Create the Electron app automatically. No pre-existing desktop-app folder is required.
+          $desktop = Join-Path $repo 'desktop-app'
+          New-Item -ItemType Directory -Path $desktop -Force | Out-Null
+          Copy-Item -LiteralPath $indexFile.FullName -Destination (Join-Path $desktop 'index.html') -Force
+
+          $package = [ordered]@{
+            name = 'snow-rider-3d-desktop'
+            version = '1.0.0'
+            private = $true
+            description = 'Snow Rider 3D Windows desktop wrapper'
+            main = 'main.js'
+            scripts = @{ build = 'electron-builder --win' }
+            devDependencies = @{ electron = 'latest'; 'electron-builder' = 'latest' }
+            build = [ordered]@{
+              appId = 'com.snowrider.desktop'
+              productName = 'Snow Rider 3D'
+              directories = @{ output = 'release' }
+              files = @('package.json', 'main.js', 'index.html')
+              win = @{ target = @(@{ target = 'nsis'; arch = @('x64') }, @{ target = 'portable'; arch = @('x64') }) }
+              nsis = @{ artifactName = 'SnowRider-Setup-${version}.${ext}'; oneClick = $false; allowToChangeInstallationDirectory = $true; createDesktopShortcut = $true; createStartMenuShortcut = $true }
+              portable = @{ artifactName = 'SnowRider-Portable-${version}.${ext}' }
+            }
+          }
+          $packageJson = $package | ConvertTo-Json -Depth 20
+          [IO.File]::WriteAllText((Join-Path $desktop 'package.json'), $packageJson, [Text.UTF8Encoding]::new($false))
+
+          $mainJsBase64 = 'Y29uc3QgeyBhcHAsIEJyb3dzZXJXaW5kb3csIGRpYWxvZyB9ID0gcmVxdWlyZSgnZWxlY3Ryb24nKTsKY29uc3QgZnMgPSByZXF1aXJlKCdub2RlOmZzJyk7CmNvbnN0IHBhdGggPSByZXF1aXJlKCdub2RlOnBhdGgnKTsKY29uc3QgaHR0cCA9IHJlcXVpcmUoJ25vZGU6aHR0cCcpOwoKbGV0IGxvY2FsU2VydmVyOwoKZnVuY3Rpb24gc3RhcnRMb2NhbFNlcnZlcigpIHsKICByZXR1cm4gbmV3IFByb21pc2UoKHJlc29sdmUsIHJlamVjdCkgPT4gewogICAgbG9jYWxTZXJ2ZXIgPSBodHRwLmNyZWF0ZVNlcnZlcigocmVxdWVzdCwgcmVzcG9uc2UpID0+IHsKICAgICAgY29uc3QgcGF0aG5hbWUgPSBuZXcgVVJMKHJlcXVlc3QudXJsLCAnaHR0cDovLzEyNy4wLjAuMScpLnBhdGhuYW1lOwogICAgICBpZiAocGF0aG5hbWUgIT09ICcvJyAmJiBwYXRobmFtZSAhPT0gJy9pbmRleC5odG1sJykgewogICAgICAgIHJlc3BvbnNlLndyaXRlSGVhZCg0MDQsIHsgJ0NvbnRlbnQtVHlwZSc6ICd0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04JyB9KTsKICAgICAgICByZXNwb25zZS5lbmQoJ05vdCBmb3VuZCcpOwogICAgICAgIHJldHVybjsKICAgICAgfQogICAgICByZXNwb25zZS53cml0ZUhlYWQoMjAwLCB7CiAgICAgICAgJ0NvbnRlbnQtVHlwZSc6ICd0ZXh0L2h0bWw7IGNoYXJzZXQ9dXRmLTgnLAogICAgICAgICdDYWNoZS1Db250cm9sJzogJ25vLXN0b3JlJwogICAgICB9KTsKICAgICAgZnMuY3JlYXRlUmVhZFN0cmVhbShwYXRoLmpvaW4oX19kaXJuYW1lLCAnaW5kZXguaHRtbCcpKS5waXBlKHJlc3BvbnNlKTsKICAgIH0pOwogICAgbG9jYWxTZXJ2ZXIub25jZSgnZXJyb3InLCByZWplY3QpOwogICAgbG9jYWxTZXJ2ZXIubGlzdGVuKDAsICcxMjcuMC4wLjEnLCAoKSA9PiByZXNvbHZlKGxvY2FsU2VydmVyLmFkZHJlc3MoKS5wb3J0KSk7CiAgfSk7Cn0KCmFzeW5jIGZ1bmN0aW9uIGNyZWF0ZVdpbmRvdygpIHsKICBjb25zdCBwb3J0ID0gYXdhaXQgc3RhcnRMb2NhbFNlcnZlcigpOwogIGNvbnN0IHdpbmRvdyA9IG5ldyBCcm93c2VyV2luZG93KHsKICAgIHdpZHRoOiAxMjgwLAogICAgaGVpZ2h0OiA4MDAsCiAgICBtaW5XaWR0aDogOTAwLAogICAgbWluSGVpZ2h0OiA2MDAsCiAgICBiYWNrZ3JvdW5kQ29sb3I6ICcjMGIyNTQwJywKICAgIGF1dG9IaWRlTWVudUJhcjogdHJ1ZSwKICAgIHdlYlByZWZlcmVuY2VzOiB7CiAgICAgIGNvbnRleHRJc29sYXRpb246IHRydWUsCiAgICAgIG5vZGVJbnRlZ3JhdGlvbjogZmFsc2UsCiAgICAgIHNhbmRib3g6IHRydWUKICAgIH0KICB9KTsKICB3aW5kb3cuc2V0TWVudUJhclZpc2liaWxpdHkoZmFsc2UpOwogIGF3YWl0IHdpbmRvdy5sb2FkVVJMKGBodHRwOi8vMTI3LjAuMC4xOiR7cG9ydH0vYCk7Cn0KCmFwcC53aGVuUmVhZHkoKS50aGVuKGNyZWF0ZVdpbmRvdykuY2F0Y2goKGVycm9yKSA9PiB7CiAgZGlhbG9nLnNob3dFcnJvckJveCgnU25vdyBSaWRlciAzRCBjb3VsZCBub3Qgc3RhcnQnLCBTdHJpbmcoZXJyb3Iuc3RhY2sgfHwgZXJyb3IpKTsKICBhcHAucXVpdCgpOwp9KTsKCmFwcC5vbignYmVmb3JlLXF1aXQnLCAoKSA9PiB7CiAgaWYgKGxvY2FsU2VydmVyICYmIGxvY2FsU2VydmVyLmxpc3RlbmluZykgbG9jYWxTZXJ2ZXIuY2xvc2UoKTsKfSk7CmFwcC5vbignd2luZG93LWFsbC1jbG9zZWQnLCAoKSA9PiB7CiAgaWYgKHByb2Nlc3MucGxhdGZvcm0gIT09ICdkYXJ3aW4nKSBhcHAucXVpdCgpOwp9KTsK'
+          [IO.File]::WriteAllBytes((Join-Path $desktop 'main.js'), [Convert]::FromBase64String($mainJsBase64))
+          Write-Host "Using game page: $($indexFile.FullName)"
+          Write-Host 'Electron app files created successfully.'
+
+      - name: Install Electron dependencies
+        working-directory: desktop-app
+        run: npm install --no-audit --no-fund
+
+      - name: Build Windows installer and portable EXE
+        working-directory: desktop-app
+        run: npm run build
+
+      - name: Upload Windows EXE files
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnowRider-Windows-EXE
+          path: desktop-app/release/*.exe
+          if-no-files-found: error
